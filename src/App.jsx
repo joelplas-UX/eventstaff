@@ -1,5 +1,6 @@
 // ─── EventStaff — Multi-tenant SaaS voor eventplanners ──────────────────────
 import { useState, useEffect, useRef } from 'react'
+import emailjs from '@emailjs/browser'
 import { initializeApp } from 'firebase/app'
 import {
   getAuth, onAuthStateChanged,
@@ -45,6 +46,43 @@ async function saveDoc(tid,col,data) {
 async function removeDoc(tid,col,id) { await deleteDoc(tDoc(tid,col,id)) }
 async function linkUser(uid,tenantId,role='admin') {
   await setDoc(doc(db,'users',uid),{tenantId,role},{merge:true})
+}
+
+// ─── Email helpers (EmailJS) ─────────────────────────────────────────────────
+const EJS_SVC  = import.meta.env.VITE_EMAILJS_SERVICE_ID    || ''
+const EJS_PUB  = import.meta.env.VITE_EMAILJS_PUBLIC_KEY    || ''
+const EJS_INV  = import.meta.env.VITE_EMAILJS_INVITE_TEMPLATE     || ''
+const EJS_ASS  = import.meta.env.VITE_EMAILJS_ASSIGNMENT_TEMPLATE || ''
+const APP_URL  = import.meta.env.VITE_APP_URL || window.location.origin
+
+async function sendEmail(templateId, params) {
+  if (!EJS_SVC || !EJS_PUB || !templateId) return   // niet geconfigureerd
+  try {
+    await emailjs.send(EJS_SVC, templateId, params, { publicKey: EJS_PUB })
+  } catch(e) { console.warn('Email mislukt:', e) }
+}
+
+function sendInviteEmail({ name, email, inviteToken, tenantId, bureauName }) {
+  const url = `${APP_URL}/?invite=${inviteToken}&tid=${tenantId}`
+  return sendEmail(EJS_INV, {
+    to_name:    name,
+    to_email:   email,
+    invite_url: url,
+    bureau_name:bureauName,
+  })
+}
+
+function sendAssignmentEmail({ name, email, eventTitle, eventDate, location, role, callTime }) {
+  return sendEmail(EJS_ASS, {
+    to_name:        name,
+    to_email:       email,
+    event_title:    eventTitle,
+    event_date:     fmtDateLong(eventDate),
+    event_location: location || '—',
+    assignment_role:role || '—',
+    call_time:      callTime || '—',
+    app_url:        APP_URL,
+  })
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -658,7 +696,7 @@ function EventModal({ tid, event, onSave, onClose }) {
 }
 
 // ─── AssignmentModal ──────────────────────────────────────────────────────────
-function AssignmentModal({ tid, eventId, eventDate, personnel, existing, onSave, onClose }) {
+function AssignmentModal({ tid, eventId, eventDate, eventTitle, eventLocation, personnel, existing, onSave, onClose }) {
   const [pid,    setPid]    = useState(existing?.personnelId || '')
   const [role,   setRole]   = useState(existing?.role || '')
   const [call,   setCall]   = useState(existing?.callTime || '')
@@ -671,11 +709,21 @@ function AssignmentModal({ tid, eventId, eventDate, personnel, existing, onSave,
     e.preventDefault()
     if (!pid) return
     setBusy(true)
+    const isNew = !existing?.id
     try {
       await saveDoc(tid,'assignments',{
         id: existing?.id||uid(), eventId, personnelId:pid,
         role, callTime:call, endTime:end, fee, status, createdAt:Date.now(),
       })
+      // Stuur notificatiemail bij nieuw assignment of statuswijziging naar 'uitgenodigd'
+      const person = personnel.find(p=>p.id===pid)
+      if (person?.email && (isNew || (existing?.status !== status && status === 'uitgenodigd'))) {
+        sendAssignmentEmail({
+          name: person.name, email: person.email,
+          eventTitle: eventTitle||'', eventDate: eventDate||'',
+          location: eventLocation||'', role, callTime: call,
+        })
+      }
       onSave()
     } finally { setBusy(false) }
   }
@@ -850,6 +898,7 @@ function EventDetailPanel({ tid, event, assignments, personnel, onEdit, onDelete
       {showAssModal && (
         <AssignmentModal
           tid={tid} eventId={event.id} eventDate={event.date}
+          eventTitle={event.title} eventLocation={event.location}
           personnel={personnel} existing={editAss}
           onSave={()=>{setShowAssModal(false); toast('Toewijzing opgeslagen')}}
           onClose={()=>setShowAssModal(false)}
@@ -965,11 +1014,17 @@ function EvenementenView({ tid, events, personnel, assignments, onOpenDetail, to
 }
 
 // ─── PersoneelModal ───────────────────────────────────────────────────────────
-function PersoneelModal({ tid, person, onSave, onClose }) {
-  const def = { id:'', name:'', email:'', phone:'', type:'freelancer', function:'', rate:'', notes:'' }
-  const [f, setF] = useState({...def,...person})
-  const [busy, setBusy] = useState(false)
+function PersoneelModal({ tid, person, tenantName, onSave, onClose }) {
+  const def = { id:'', name:'', email:'', phone:'', type:'freelancer', function:'', rate:'', notes:'', portalEnabled:false }
+  const [f,           setF]           = useState({...def,...person})
+  const [busy,        setBusy]        = useState(false)
+  const [inviteBusy,  setInviteBusy]  = useState(false)
+  const [inviteSent,  setInviteSent]  = useState(false)
   const set = (k,v) => setF(p=>({...p,[k]:v}))
+
+  const hasPortal   = !!f.uid                           // al geaccepteerd
+  const isInvited   = !!f.inviteToken && !f.uid         // uitgenodigd, nog niet geaccepteerd
+  const canInvite   = f.email && !hasPortal && f.id     // kan worden uitgenodigd
 
   const submit = async e => {
     e.preventDefault()
@@ -979,6 +1034,28 @@ function PersoneelModal({ tid, person, onSave, onClose }) {
       await saveDoc(tid,'personnel',{...f, updatedAt:Date.now()})
       onSave()
     } finally { setBusy(false) }
+  }
+
+  const sendInvite = async () => {
+    if (!canInvite) return
+    setInviteBusy(true)
+    try {
+      const token = uid()
+      await saveDoc(tid,'personnel',{...f, inviteToken:token, invitedAt:Date.now(), portalEnabled:true})
+      await sendInviteEmail({
+        name: f.name, email: f.email,
+        inviteToken: token, tenantId: tid,
+        bureauName: tenantName || 'EventStaff',
+      })
+      setF(p=>({...p, inviteToken:token, portalEnabled:true}))
+      setInviteSent(true)
+    } finally { setInviteBusy(false) }
+  }
+
+  const portalStatusBadge = () => {
+    if (hasPortal)   return <span className="badge" style={{background:'var(--green-light)',color:'var(--green)'}}>✓ Portaal actief</span>
+    if (isInvited)   return <span className="badge" style={{background:'var(--orange-light)',color:'var(--orange)'}}>📧 Uitgenodigd</span>
+    return <span className="badge" style={{background:'var(--bg)',color:'var(--ink3)'}}>Geen portaal</span>
   }
 
   return (
@@ -1006,7 +1083,7 @@ function PersoneelModal({ tid, person, onSave, onClose }) {
           <div><label className="form-label">Telefoonnummer</label>
             <input className="form-input" type="tel" value={f.phone} onChange={e=>set('phone',e.target.value)}/></div>
         </div>
-        <div className="form-row" style={{marginBottom:0}}>
+        <div className="form-row cols2" style={{marginBottom:0}}>
           <div><label className="form-label">Dagvergoeding / uurtarief (€)</label>
             <input className="form-input" type="number" min="0" value={f.rate} onChange={e=>set('rate',e.target.value)} placeholder="0"/></div>
         </div>
@@ -1014,13 +1091,39 @@ function PersoneelModal({ tid, person, onSave, onClose }) {
           <div><label className="form-label">Notities</label>
             <textarea className="form-input" value={f.notes} onChange={e=>set('notes',e.target.value)} placeholder="Bijzonderheden, skills, voorkeuren…"/></div>
         </div>
+
+        {/* Portaalsectie — alleen bij bestaande records */}
+        {f.id && (
+          <>
+            <div className="form-section">Portaaltoegang</div>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:10}}>
+              <div>
+                {portalStatusBadge()}
+                {hasPortal && <div style={{fontSize:12,color:'var(--ink3)',marginTop:4}}>Inloggen via {f.email}</div>}
+                {isInvited && !inviteSent && <div style={{fontSize:12,color:'var(--ink3)',marginTop:4}}>Uitnodiging verstuurd — nog niet geaccepteerd</div>}
+                {inviteSent && <div style={{fontSize:12,color:'var(--green)',marginTop:4}}>✓ Uitnodiging zojuist verstuurd naar {f.email}</div>}
+                {!hasPortal && !isInvited && !f.email && <div style={{fontSize:12,color:'var(--ink3)',marginTop:4}}>Voeg een e-mailadres toe om uit te nodigen</div>}
+              </div>
+              {canInvite && !hasPortal && (
+                <button type="button" className="btn btn-ghost btn-sm" onClick={sendInvite} disabled={inviteBusy||inviteSent}>
+                  {inviteBusy ? 'Versturen…' : inviteSent ? '✓ Verstuurd' : isInvited ? '↩ Opnieuw uitnodigen' : '📧 Uitnodiging sturen'}
+                </button>
+              )}
+            </div>
+          </>
+        )}
+        {!f.id && (
+          <div style={{fontSize:12,color:'var(--ink3)',marginTop:12,padding:'10px 14px',background:'var(--bg)',borderRadius:8}}>
+            💡 Sla het personeelslid eerst op — daarna kun je een portaaluitnodiging sturen.
+          </div>
+        )}
       </form>
     </Modal>
   )
 }
 
 // ─── PersoneelView ────────────────────────────────────────────────────────────
-function PersoneelView({ tid, personnel, assignments, events, toast }) {
+function PersoneelView({ tid, personnel, assignments, events, tenantName, toast }) {
   const [showModal,   setShowModal]   = useState(false)
   const [editPerson,  setEditPerson]  = useState(null)
   const [filterType,  setFilterType]  = useState('alle')
@@ -1071,7 +1174,7 @@ function PersoneelView({ tid, personnel, assignments, events, toast }) {
           : <div className="tbl-wrap">
               <table className="tbl">
                 <thead><tr>
-                  <th>Naam</th><th>Type</th><th>Functie</th><th>Contact</th><th>Tarief</th><th>Komende events</th><th></th>
+                  <th>Naam</th><th>Type</th><th>Functie</th><th>Contact</th><th>Tarief</th><th>Portaal</th><th>Komende events</th><th></th>
                 </tr></thead>
                 <tbody>
                   {filtered.map(p => (
@@ -1085,6 +1188,14 @@ function PersoneelView({ tid, personnel, assignments, events, toast }) {
                         {!p.email && !p.phone && <span style={{color:'var(--ink3)'}}>—</span>}
                       </td>
                       <td style={{color:'var(--ink2)'}}>{p.rate ? '€'+Number(p.rate).toLocaleString('nl-NL') : '—'}</td>
+                      <td>
+                        {p.uid
+                          ? <span className="badge" style={{background:'var(--green-light)',color:'var(--green)'}}>✓ Actief</span>
+                          : p.inviteToken
+                          ? <span className="badge" style={{background:'var(--orange-light)',color:'var(--orange)'}}>📧 Uitgenodigd</span>
+                          : <span style={{color:'var(--ink3)',fontSize:12}}>—</span>
+                        }
+                      </td>
                       <td style={{color:'var(--ink2)'}}>{upcoming(p.id)}</td>
                       <td>
                         <div style={{display:'flex',gap:6}}>
@@ -1101,7 +1212,8 @@ function PersoneelView({ tid, personnel, assignments, events, toast }) {
       </div>
 
       {showModal && (
-        <PersoneelModal tid={tid} person={editPerson} onClose={()=>setShowModal(false)}
+        <PersoneelModal tid={tid} person={editPerson} tenantName={tenantName}
+          onClose={()=>setShowModal(false)}
           onSave={()=>{setShowModal(false); toast('Personeelslid opgeslagen')}}/>
       )}
     </>
@@ -1423,6 +1535,351 @@ function BeschikbaarheidView({ tid, personnel, availability, events, toast }) {
   )
 }
 
+// ─── InviteAcceptScreen ───────────────────────────────────────────────────────
+// Getoond als URL ?invite=TOKEN&tid=TID aanwezig is
+function InviteAcceptScreen({ inviteToken, tenantId, onDone }) {
+  const [personnel, setPersonnel] = useState(null)   // gevonden personeelslid
+  const [notFound,  setNotFound]  = useState(false)
+  const [pass,      setPass]      = useState('')
+  const [pass2,     setPass2]     = useState('')
+  const [err,       setErr]       = useState('')
+  const [busy,      setBusy]      = useState(false)
+  const [done,      setDone]      = useState(false)
+
+  // Zoek het personeelslid op via inviteToken
+  useEffect(() => {
+    if (!tenantId || !inviteToken) { setNotFound(true); return }
+    getDocs(tCol(tenantId,'personnel')).then(snap => {
+      const found = snap.docs.map(d=>({id:d.id,...d.data()}))
+        .find(p => p.inviteToken === inviteToken)
+      if (found) setPersonnel(found)
+      else setNotFound(true)
+    })
+  }, [inviteToken, tenantId])
+
+  const submit = async e => {
+    e.preventDefault()
+    setErr('')
+    if (pass !== pass2) { setErr('Wachtwoorden komen niet overeen.'); return }
+    if (pass.length < 6) { setErr('Minimaal 6 tekens.'); return }
+    setBusy(true)
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, personnel.email, pass)
+      // Koppel auth-uid aan personeelsdoc + aan /users
+      await setDoc(tDoc(tenantId,'personnel',personnel.id), {
+        uid: cred.user.uid, inviteToken: null, invitedAt: personnel.invitedAt,
+        portalEnabled: true,
+      }, { merge: true })
+      await linkUser(cred.user.uid, tenantId, 'personnel')
+      setDone(true)
+      setTimeout(() => onDone(), 1500)
+    } catch(ex) {
+      const msgs = {
+        'auth/email-already-in-use': 'Dit e-mailadres heeft al een account. Probeer in te loggen.',
+        'auth/weak-password': 'Wachtwoord te zwak.',
+      }
+      setErr(msgs[ex.code] || ex.message)
+    } finally { setBusy(false) }
+  }
+
+  if (notFound) return (
+    <div className="login-wrap">
+      <div className="login-box" style={{textAlign:'center'}}>
+        <div className="login-logo">EventStaff</div>
+        <div style={{marginTop:16,color:'var(--ink2)'}}>
+          Deze uitnodigingslink is ongeldig of al gebruikt.
+        </div>
+        <button className="btn btn-ghost" style={{marginTop:20,width:'100%',justifyContent:'center'}}
+          onClick={()=>window.location.href='/'}>Naar inlogpagina</button>
+      </div>
+    </div>
+  )
+
+  if (!personnel) return (
+    <div className="login-wrap">
+      <div style={{color:'var(--ink3)'}}>Uitnodiging valideren…</div>
+    </div>
+  )
+
+  if (done) return (
+    <div className="login-wrap">
+      <div className="login-box" style={{textAlign:'center'}}>
+        <div style={{fontSize:40,marginBottom:12}}>✅</div>
+        <div style={{fontWeight:700,fontSize:18}}>Account aangemaakt!</div>
+        <div style={{color:'var(--ink3)',marginTop:8}}>Je wordt automatisch ingelogd…</div>
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="login-wrap">
+      <div className="login-box">
+        <div className="login-logo">EventStaff</div>
+        <div className="login-sub">Je bent uitgenodigd door een eventbureau</div>
+        <div style={{background:'var(--bg)',borderRadius:8,padding:'12px 16px',marginBottom:20}}>
+          <div style={{fontSize:12,color:'var(--ink3)',marginBottom:2}}>Welkom</div>
+          <div style={{fontWeight:700}}>{personnel.name}</div>
+          <div style={{fontSize:13,color:'var(--ink2)'}}>{personnel.email}</div>
+          {personnel.function && <div style={{fontSize:12,color:'var(--ink3)'}}>{personnel.function}</div>}
+        </div>
+        <div style={{fontSize:13,color:'var(--ink2)',marginBottom:20}}>
+          Kies een wachtwoord om je portaal te activeren.
+        </div>
+        {err && <div className="login-err">{err}</div>}
+        <form onSubmit={submit}>
+          <div className="form-row" style={{marginBottom:14}}>
+            <div>
+              <label className="form-label">Wachtwoord</label>
+              <input className="form-input" type="password" value={pass}
+                onChange={e=>setPass(e.target.value)} required minLength={6} autoFocus/>
+            </div>
+          </div>
+          <div className="form-row" style={{marginBottom:24}}>
+            <div>
+              <label className="form-label">Wachtwoord herhalen</label>
+              <input className="form-input" type="password" value={pass2}
+                onChange={e=>setPass2(e.target.value)} required/>
+            </div>
+          </div>
+          <button className="btn btn-primary" style={{width:'100%',justifyContent:'center'}} disabled={busy}>
+            {busy ? 'Account aanmaken…' : 'Portaal activeren'}
+          </button>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+// ─── PersonnelPortal ──────────────────────────────────────────────────────────
+// Eigen portaal voor ingelogd personeelslid
+function PersonnelPortal({ tid, myPersonnel, allEvents, allAssignments, availability, toast, onLogout }) {
+  const [tab,       setTab]       = useState('assignments')  // assignments | beschikbaarheid
+  const [showAvMod, setShowAvMod] = useState(false)
+  const [editAvRec, setEditAvRec] = useState(null)
+  const now = toDay()
+
+  // Eigen assignments
+  const myAssignments = allAssignments
+    .filter(a => a.personnelId === myPersonnel.id)
+    .sort((a,b) => {
+      const ea = allEvents.find(e=>e.id===a.eventId)
+      const eb = allEvents.find(e=>e.id===b.eventId)
+      return (ea?.date||'').localeCompare(eb?.date||'')
+    })
+
+  const upcoming = myAssignments.filter(a => {
+    const ev = allEvents.find(e=>e.id===a.eventId)
+    return ev && ev.date >= now && ev.status !== 'gecancelled'
+  })
+  const past = myAssignments.filter(a => {
+    const ev = allEvents.find(e=>e.id===a.eventId)
+    return ev && ev.date < now
+  })
+
+  // Eigen beschikbaarheid
+  const myAv = availability.filter(r => r.personnelId === myPersonnel.id)
+
+  // Bevestig / wijs af assignment
+  const respondAssignment = async (ass, status) => {
+    await saveDoc(tid, 'assignments', {...ass, status})
+    toast(status === 'bevestigd' ? '✓ Bevestigd!' : '✗ Afgewezen')
+  }
+
+  const assStatusColor = {uitgenodigd:'var(--orange)',bevestigd:'var(--green)',afgewezen:'var(--red)'}
+  const assStatusBg    = {uitgenodigd:'var(--orange-light)',bevestigd:'var(--green-light)',afgewezen:'var(--red-light)'}
+
+  const renderAssignmentList = (list, showPast=false) => {
+    if (list.length === 0) return (
+      <div className="empty">
+        <div className="empty-icon">{showPast ? '📁' : '🎉'}</div>
+        <div className="empty-text">{showPast ? 'Geen verleden opdrachten' : 'Geen aankomende opdrachten'}</div>
+      </div>
+    )
+    return (
+      <div className="tbl-wrap">
+        {list.map(a => {
+          const ev = allEvents.find(e=>e.id===a.eventId)
+          if (!ev) return null
+          const dt  = new Date(ev.date+'T12:00')
+          const day = dt.toLocaleDateString('nl-NL',{day:'numeric'})
+          const mon = dt.toLocaleDateString('nl-NL',{month:'short'})
+          const dow = dt.toLocaleDateString('nl-NL',{weekday:'short'})
+          return (
+            <div key={a.id} style={{
+              display:'flex', alignItems:'center', gap:0,
+              borderBottom:'1px solid var(--border)',
+            }}>
+              <div style={{width:4,alignSelf:'stretch',background:STATUS_COLOR[ev.status]||'var(--ink3)',flexShrink:0}}/>
+              <div style={{display:'flex',alignItems:'center',gap:14,padding:'14px 18px',flex:1,minWidth:0}}>
+                {/* Datum */}
+                <div style={{width:52,textAlign:'center',flexShrink:0}}>
+                  <div style={{fontSize:22,fontWeight:800,fontFamily:"'Sora',sans-serif",lineHeight:1}}>{day}</div>
+                  <div style={{fontSize:11,color:'var(--ink3)',textTransform:'uppercase'}}>{mon}</div>
+                  <div style={{fontSize:10,color:'var(--ink3)'}}>{dow}</div>
+                </div>
+                {/* Event info */}
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontWeight:700,fontSize:15}}>{ev.title}</div>
+                  <div style={{fontSize:12.5,color:'var(--ink2)',marginTop:2}}>
+                    {ev.location||ev.city||''}
+                    {a.role ? ` · ${a.role}` : ''}
+                    {a.callTime ? ` · aanwezig ${a.callTime}` : ev.startTime ? ` · start ${ev.startTime}` : ''}
+                  </div>
+                  {ev.notes && <div style={{fontSize:12,color:'var(--ink3)',marginTop:4,fontStyle:'italic'}}>{ev.notes}</div>}
+                </div>
+                {/* Status + knoppen */}
+                <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:8,flexShrink:0}}>
+                  <span className="badge" style={{background:assStatusBg[a.status],color:assStatusColor[a.status]}}>
+                    {ASS_STATUS[a.status]||a.status}
+                  </span>
+                  {!showPast && a.status === 'uitgenodigd' && (
+                    <div style={{display:'flex',gap:6}}>
+                      <button className="btn btn-sm" style={{background:'var(--green-light)',color:'var(--green)'}}
+                        onClick={()=>respondAssignment(a,'bevestigd')}>
+                        <IcCheck size={13}/>Bevestigen
+                      </button>
+                      <button className="btn btn-ghost btn-sm"
+                        onClick={()=>respondAssignment(a,'afgewezen')}>
+                        Afwijzen
+                      </button>
+                    </div>
+                  )}
+                  {!showPast && a.status === 'bevestigd' && (
+                    <button className="btn btn-ghost btn-sm"
+                      onClick={()=>respondAssignment(a,'afgewezen')}>
+                      Afzeggen
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
+  return (
+    <>
+      <style>{CSS}</style>
+      <div style={{minHeight:'100vh',background:'var(--bg)'}}>
+        {/* Header */}
+        <div style={{
+          background:'var(--card)', borderBottom:'1px solid var(--border)',
+          padding:'14px 24px', display:'flex', alignItems:'center', justifyContent:'space-between',
+        }}>
+          <div style={{display:'flex',alignItems:'center',gap:12}}>
+            <div style={{fontFamily:"'Sora',sans-serif",fontWeight:800,color:'var(--accent)',fontSize:18}}>EventStaff</div>
+            <div style={{width:1,height:20,background:'var(--border)'}}/>
+            <div>
+              <div style={{fontWeight:600,fontSize:14}}>{myPersonnel.name}</div>
+              <div style={{fontSize:12,color:'var(--ink3)'}}>{PERS_TYPES[myPersonnel.type]||''}{myPersonnel.function ? ' · '+myPersonnel.function : ''}</div>
+            </div>
+          </div>
+          <button className="btn btn-ghost btn-sm" onClick={onLogout}><IcLogout size={14}/>Uitloggen</button>
+        </div>
+
+        {/* Stats */}
+        <div style={{padding:'20px 24px 0'}}>
+          <div className="stats" style={{gridTemplateColumns:'repeat(auto-fill,minmax(140px,1fr))'}}>
+            <div className="stat">
+              <div className="stat-n" style={{color:'var(--orange)'}}>{upcoming.filter(a=>a.status==='uitgenodigd').length}</div>
+              <div className="stat-l">Open uitnodigingen</div>
+            </div>
+            <div className="stat">
+              <div className="stat-n" style={{color:'var(--green)'}}>{upcoming.filter(a=>a.status==='bevestigd').length}</div>
+              <div className="stat-l">Bevestigd</div>
+            </div>
+            <div className="stat">
+              <div className="stat-n">{myAv.filter(r=>r.date>=now&&r.status==='beschikbaar').length}</div>
+              <div className="stat-l">Beschikbaar (komend)</div>
+            </div>
+            <div className="stat">
+              <div className="stat-n">{past.length}</div>
+              <div className="stat-l">Verleden opdrachten</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div style={{padding:'0 24px',borderBottom:'2px solid var(--border)',display:'flex',gap:0,marginTop:16}}>
+          {[
+            {key:'assignments', label:`Opdrachten (${myAssignments.length})`},
+            {key:'beschikbaarheid', label:`Mijn beschikbaarheid (${myAv.length})`},
+          ].map(t=>(
+            <button key={t.key} onClick={()=>setTab(t.key)} style={{
+              padding:'10px 20px', fontWeight:600, fontSize:13, border:'none',
+              background:'none', cursor:'pointer',
+              color: tab===t.key ? 'var(--accent)' : 'var(--ink3)',
+              borderBottom: tab===t.key ? '2px solid var(--accent)' : '2px solid transparent',
+              marginBottom:'-2px',
+            }}>{t.label}</button>
+          ))}
+        </div>
+
+        <div style={{padding:'20px 24px'}}>
+          {/* Opdrachten tab */}
+          {tab === 'assignments' && (
+            <>
+              {upcoming.filter(a=>a.status==='uitgenodigd').length > 0 && (
+                <div style={{
+                  background:'var(--orange-light)',border:'1px solid var(--orange)',
+                  borderRadius:10,padding:'14px 18px',marginBottom:20,fontSize:13,
+                }}>
+                  <strong>Je hebt {upcoming.filter(a=>a.status==='uitgenodigd').length} open uitnodiging{upcoming.filter(a=>a.status==='uitgenodigd').length!==1?'en':''}</strong> — bevestig of wijs af hieronder.
+                </div>
+              )}
+              <div className="section-head" style={{marginBottom:12}}>
+                <div className="section-title" style={{fontSize:15}}>Aankomend</div>
+              </div>
+              {renderAssignmentList(upcoming)}
+
+              {past.length > 0 && (
+                <>
+                  <div className="section-head" style={{marginTop:28,marginBottom:12}}>
+                    <div className="section-title" style={{fontSize:15,color:'var(--ink3)'}}>Verleden</div>
+                  </div>
+                  {renderAssignmentList(past, true)}
+                </>
+              )}
+            </>
+          )}
+
+          {/* Beschikbaarheid tab */}
+          {tab === 'beschikbaarheid' && (
+            <>
+              <div className="section-head" style={{marginBottom:16}}>
+                <div className="section-title" style={{fontSize:15}}>Mijn beschikbaarheid</div>
+                <button className="btn btn-primary btn-sm" onClick={()=>{setEditAvRec(null);setShowAvMod(true)}}>
+                  <IcPlus size={14}/>Toevoegen
+                </button>
+              </div>
+              <BeschikbaarheidView
+                tid={tid}
+                personnel={[myPersonnel]}
+                availability={myAv}
+                events={allEvents}
+                toast={toast}
+              />
+            </>
+          )}
+        </div>
+      </div>
+
+      {showAvMod && (
+        <AvailabilityModal
+          tid={tid}
+          record={editAvRec}
+          personnel={[myPersonnel]}
+          defaultPersonnelId={myPersonnel.id}
+          onClose={()=>setShowAvMod(false)}
+          onSave={()=>{ setShowAvMod(false); toast('Beschikbaarheid opgeslagen') }}
+        />
+      )}
+    </>
+  )
+}
+
 // ─── BeheerView (superadmin) ──────────────────────────────────────────────────
 function BeheerView({ onImpersonate }) {
   const [tenants, setTenants] = useState([])
@@ -1474,6 +1931,9 @@ function BeheerView({ onImpersonate }) {
 export default function App() {
   const [authUser,    setAuthUser]    = useState(undefined)   // undefined=loading
   const [tenantId,    setTenantId]    = useState(null)
+  const [tenantName,  setTenantName]  = useState('')
+  const [userRole,    setUserRole]    = useState(null)        // 'admin'|'planner'|'personnel'
+  const [myPersonnel, setMyPersonnel] = useState(null)
   const [data, setData] = useState({ events:[], personnel:[], assignments:[], availability:[] })
   const [view,        setView]        = useState('dashboard')
   const [loading,     setLoading]     = useState(true)
@@ -1486,6 +1946,11 @@ export default function App() {
   const [showEditEv,  setShowEditEv]  = useState(false)
   const unsubsRef = useRef([])
 
+  // ── Invite URL params ──────────────────────────────────────────────────────
+  const _params     = new URLSearchParams(window.location.search)
+  const inviteToken = _params.get('invite')
+  const inviteTid   = _params.get('tid')
+
   const toast = msg => { setToastMsg(null); setTimeout(()=>setToastMsg(msg), 10) }
 
   // ── Auth listener ──────────────────────────────────────────────────────────
@@ -1497,13 +1962,15 @@ export default function App() {
     return unsub
   }, [])
 
-  // ── Fetch tenantId ─────────────────────────────────────────────────────────
+  // ── Fetch tenantId + role ──────────────────────────────────────────────────
   useEffect(() => {
     if (!authUser) return
     if (authUser.email === SUPERADMIN) { setLoading(false); return }
     getDoc(doc(db,'users',authUser.uid)).then(snap => {
       if (snap.exists() && snap.data().tenantId) {
-        setTenantId(snap.data().tenantId)
+        const ud = snap.data()
+        setTenantId(ud.tenantId)
+        setUserRole(ud.role || 'admin')
       } else {
         setLoading(false) // No tenant → onboarding
       }
@@ -1533,6 +2000,21 @@ export default function App() {
     setLoading(false)
     return () => unsubsRef.current.forEach(u=>u())
   }, [tenantId])
+
+  // ── Load tenantName ────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!tenantId) return
+    getDoc(tRef(tenantId)).then(snap => {
+      if (snap.exists()) setTenantName(snap.data().name || '')
+    })
+  }, [tenantId])
+
+  // ── Resolve myPersonnel (for personnel role) ───────────────────────────────
+  useEffect(() => {
+    if (userRole !== 'personnel' || !authUser || !data.personnel.length) return
+    const found = data.personnel.find(p => p.uid === authUser.uid)
+    if (found) setMyPersonnel(found)
+  }, [userRole, authUser, data.personnel])
 
   // ── Superadmin impersonation ───────────────────────────────────────────────
   const impersonate = tid => {
@@ -1575,6 +2057,19 @@ export default function App() {
   }
 
   if (!authUser) {
+    // Invite link: show account creation screen
+    if (inviteToken && inviteTid) {
+      return (
+        <>
+          <style>{CSS}</style>
+          <InviteAcceptScreen
+            inviteToken={inviteToken}
+            tenantId={inviteTid}
+            onDone={() => { window.history.replaceState({}, '', '/') }}
+          />
+        </>
+      )
+    }
     return (
       <>
         <style>{CSS}</style>
@@ -1617,6 +2112,30 @@ export default function App() {
     )
   }
 
+  // Personnel portaal — eigen beperkte weergave
+  if (userRole === 'personnel') {
+    return (
+      <>
+        <style>{CSS}</style>
+        {myPersonnel
+          ? <PersonnelPortal
+              tid={tenantId}
+              myPersonnel={myPersonnel}
+              allEvents={data.events}
+              allAssignments={data.assignments}
+              availability={data.availability}
+              toast={toast}
+              onLogout={logout}
+            />
+          : <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',color:'var(--ink3)'}}>
+              Portaal laden…
+            </div>
+        }
+        {toastMsg && <Toast msg={toastMsg} onClose={()=>setToastMsg(null)}/>}
+      </>
+    )
+  }
+
   return (
     <>
       <style>{CSS}</style>
@@ -1642,7 +2161,7 @@ export default function App() {
           {view==='personeel' && (
             <PersoneelView
               tid={tenantId} personnel={data.personnel} assignments={data.assignments}
-              events={data.events} toast={toast}
+              events={data.events} tenantName={tenantName} toast={toast}
             />
           )}
           {view==='beschikbaarheid' && (
