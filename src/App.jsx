@@ -53,6 +53,9 @@ const PERS_TYPES   = {staff:'👔 Staff',freelancer:'🔧 Freelancer',act:'🎤 
 const ASS_STATUS   = {uitgenodigd:'Uitgenodigd',bevestigd:'Bevestigd',afgewezen:'Afgewezen'}
 const STATUS_COLOR = {definitief:'var(--green)',optie:'var(--orange)',gecancelled:'var(--red)'}
 const STATUS_BG    = {definitief:'var(--green-light)',optie:'var(--orange-light)',gecancelled:'var(--red-light)'}
+const AV_STATUS    = {beschikbaar:'Beschikbaar',optie:'Optie',niet_beschikbaar:'Niet beschikbaar'}
+const AV_COLOR     = {beschikbaar:'var(--green)',optie:'var(--orange)',niet_beschikbaar:'var(--red)'}
+const AV_BG        = {beschikbaar:'var(--green-light)',optie:'var(--orange-light)',niet_beschikbaar:'var(--red-light)'}
 
 // ─── CSS ─────────────────────────────────────────────────────────────────────
 const CSS = `
@@ -183,15 +186,16 @@ textarea.form-input { resize:vertical; min-height:80px; }
 .event-title { font-weight:600; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .event-meta  { font-size:12px; color:var(--ink3); margin-top:2px; }
 
-/* Availability matrix */
-.av-wrap { overflow-x:auto; }
-.av-table { border-collapse:collapse; font-size:12.5px; }
-.av-table th, .av-table td { padding:6px 8px; border:1px solid var(--border); white-space:nowrap; }
-.av-table th { background:var(--bg); font-weight:600; }
-.av-cell { width:36px; height:32px; text-align:center; cursor:pointer; border-radius:4px; }
-.av-cell.yes { background:var(--green-light); color:var(--green); font-weight:700; }
-.av-cell.no  { background:var(--red-light);   color:var(--red);   font-weight:700; }
-.av-cell.unknown { background:var(--bg); color:var(--ink3); }
+/* Availability list (bandcalendar-stijl) */
+.av-row { display:flex; align-items:center; gap:0; border-bottom:1px solid var(--border); transition:background .12s; cursor:pointer; }
+.av-row:last-child { border-bottom:none; }
+.av-row:hover { background:#fafaf8; }
+.av-row-bar { width:4px; align-self:stretch; flex-shrink:0; border-radius:0; }
+.av-row-content { display:flex; align-items:center; gap:14px; padding:13px 18px; flex:1; min-width:0; }
+.av-date-block { width:52px; text-align:center; flex-shrink:0; }
+.av-date-block .day { font-size:22px; font-weight:800; font-family:'Sora',sans-serif; line-height:1; }
+.av-date-block .mon { font-size:11px; color:var(--ink3); text-transform:uppercase; }
+.av-date-block .dow { font-size:10px; color:var(--ink3); margin-top:1px; }
 
 /* Section heading */
 .section-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
@@ -1104,110 +1108,317 @@ function PersoneelView({ tid, personnel, assignments, events, toast }) {
   )
 }
 
-// ─── BeschikbaarheidView ──────────────────────────────────────────────────────
-function BeschikbaarheidView({ tid, personnel, availability, events, toast }) {
-  const [filterType, setFilterType] = useState('alle')
-  const [weeks, setWeeks] = useState(4)
-  const today = toDay()
+// ─── AvailabilityModal ────────────────────────────────────────────────────────
+function AvailabilityModal({ tid, record, personnel, defaultPersonnelId, onSave, onClose }) {
+  const def = {
+    id:'', personnelId: defaultPersonnelId||'', date:'', status:'beschikbaar',
+    timeFrom:'', timeTo:'', notes:'',
+  }
+  const [f, setF]   = useState({...def, ...record})
+  const [busy, setBusy] = useState(false)
+  const set = (k,v) => setF(p=>({...p,[k]:v}))
 
-  // Generate date columns: today + (weeks*7-1) days
-  const days = Array.from({length:weeks*7}, (_,i) => addDays(today, i))
-
-  const filtered = personnel
-    .filter(p => filterType==='alle' || p.type===filterType)
-    .sort((a,b) => a.name.localeCompare(b.name,'nl'))
-
-  const getAv = (pid, date) => availability[`${pid}_${date}`]
-
-  const toggle = async (pid, date) => {
-    const cur = getAv(pid, date)
-    const newVal = cur ? !cur.available : true
-    await setDoc(tDoc(tid,'availability',`${pid}_${date}`), {
-      personnelId:pid, date, available:newVal, updatedAt:Date.now()
-    })
-    toast(newVal ? '✓ Beschikbaar' : '✗ Niet beschikbaar')
+  const submit = async e => {
+    e.preventDefault()
+    if (!f.personnelId || !f.date || !f.status) return
+    setBusy(true)
+    try {
+      await saveDoc(tid, 'availability', {...f, updatedAt: Date.now()})
+      onSave()
+    } finally { setBusy(false) }
   }
 
-  // Days that have events (for highlighting)
-  const eventDates = new Set(events.map(e=>e.date))
-
   return (
-    <>
-      <div className="ph">
-        <div className="ph-t">Beschikbaarheid</div>
-        <div className="ph-s">Klik op een cel om beschikbaarheid te togglen</div>
-      </div>
-      <div className="page-body">
-        <div style={{display:'flex',gap:12,marginBottom:16,flexWrap:'wrap',alignItems:'center'}}>
-          <div className="filter-bar" style={{marginBottom:0}}>
-            {['alle',...Object.keys(PERS_TYPES)].map(t=>(
-              <button key={t} className={`filter-btn${filterType===t?' active':''}`} onClick={()=>setFilterType(t)}>
-                {t==='alle' ? 'Alle' : PERS_TYPES[t]}
-              </button>
-            ))}
-          </div>
-          <select className="form-input" value={weeks} onChange={e=>setWeeks(Number(e.target.value))} style={{width:140}}>
-            <option value={2}>2 weken</option>
-            <option value={4}>4 weken</option>
-            <option value={6}>6 weken</option>
-          </select>
-          <div style={{fontSize:12,color:'var(--ink3)',display:'flex',gap:14}}>
-            <span style={{color:'var(--green)'}}>■ Beschikbaar</span>
-            <span style={{color:'var(--red)'}}>■ Niet beschikbaar</span>
-            <span style={{color:'var(--ink3)'}}>■ Onbekend</span>
+    <Modal
+      title={f.id ? 'Beschikbaarheid bewerken' : 'Beschikbaarheid toevoegen'}
+      onClose={onClose}
+      size="modal-md"
+      footer={<>
+        <button className="btn btn-ghost" onClick={onClose}>Annuleren</button>
+        <button className="btn btn-primary" onClick={submit} disabled={busy||!f.personnelId||!f.date}>
+          {busy ? 'Opslaan…' : 'Opslaan'}
+        </button>
+      </>}
+    >
+      <form onSubmit={submit}>
+        <div className="form-row">
+          <div>
+            <label className="form-label">Personeelslid *</label>
+            <select className="form-input" value={f.personnelId} onChange={e=>set('personnelId',e.target.value)} required autoFocus>
+              <option value="">— Kies persoon —</option>
+              {[...personnel].sort((a,b)=>a.name.localeCompare(b.name,'nl')).map(p=>(
+                <option key={p.id} value={p.id}>{p.name} · {PERS_TYPES[p.type]||p.type}</option>
+              ))}
+            </select>
           </div>
         </div>
 
-        {filtered.length===0
-          ? <div className="empty"><div className="empty-icon">📋</div><div className="empty-text">Geen personeelsleden</div></div>
-          : <div className="av-wrap card">
-              <table className="av-table">
-                <thead>
-                  <tr>
-                    <th style={{textAlign:'left',minWidth:140,position:'sticky',left:0,background:'var(--bg)',zIndex:1}}>Naam</th>
-                    {days.map(d => {
-                      const dt = new Date(d+'T12:00')
-                      const dow = dt.toLocaleDateString('nl-NL',{weekday:'narrow'})
-                      const dom = dt.getDate()
-                      const isWeekend = dt.getDay()===0||dt.getDay()===6
-                      const hasEvent = eventDates.has(d)
-                      return (
-                        <th key={d} style={{
-                          textAlign:'center', minWidth:40, fontSize:11,
-                          background: hasEvent ? 'var(--accent-light)' : isWeekend ? '#f8f8f6' : 'var(--bg)',
-                          color: hasEvent ? 'var(--accent)' : isWeekend ? 'var(--ink3)' : 'var(--ink)',
-                        }}>
-                          <div>{dow}</div>
-                          <div style={{fontWeight:700}}>{dom}</div>
-                        </th>
-                      )
-                    })}
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map(p => (
-                    <tr key={p.id}>
-                      <td style={{fontWeight:500,position:'sticky',left:0,background:'var(--card)',zIndex:1}}>
-                        <div>{p.name}</div>
-                        <div style={{fontSize:11,color:'var(--ink3)'}}>{PERS_TYPES[p.type]||p.type}</div>
-                      </td>
-                      {days.map(d => {
-                        const av = getAv(p.id, d)
-                        const cls = av===undefined ? 'unknown' : av.available ? 'yes' : 'no'
-                        const label = cls==='yes' ? '✓' : cls==='no' ? '✗' : '·'
-                        return (
-                          <td key={d} className={`av-cell ${cls}`} onClick={()=>toggle(p.id,d)} title={d}>
-                            {label}
-                          </td>
-                        )
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-        }
+        <div className="form-row cols2">
+          <div>
+            <label className="form-label">Datum *</label>
+            <input className="form-input" type="date" value={f.date} onChange={e=>set('date',e.target.value)} required/>
+          </div>
+          <div>
+            <label className="form-label">Status *</label>
+            <select className="form-input" value={f.status} onChange={e=>set('status',e.target.value)}>
+              {Object.entries(AV_STATUS).map(([k,v])=>(
+                <option key={k} value={k}>{v}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="form-section">Tijden</div>
+        <div className="form-row cols2">
+          <div>
+            <label className="form-label">Beschikbaar van</label>
+            <input className="form-input" type="time" value={f.timeFrom} onChange={e=>set('timeFrom',e.target.value)}/>
+          </div>
+          <div>
+            <label className="form-label">Beschikbaar tot</label>
+            <input className="form-input" type="time" value={f.timeTo} onChange={e=>set('timeTo',e.target.value)}/>
+          </div>
+        </div>
+
+        <div className="form-row" style={{marginBottom:0}}>
+          <div>
+            <label className="form-label">Notities / bijzonderheden</label>
+            <textarea className="form-input" value={f.notes} onChange={e=>set('notes',e.target.value)}
+              placeholder="bv. Alleen 's avonds, auto beschikbaar, etc."/>
+          </div>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+// ─── BeschikbaarheidView ──────────────────────────────────────────────────────
+function BeschikbaarheidView({ tid, personnel, availability, events, toast }) {
+  const [tab,        setTab]        = useState('toekomend')  // toekomend | verleden | alle
+  const [filterType, setFilterType] = useState('alle')
+  const [query,      setQuery]      = useState('')
+  const [showModal,  setShowModal]  = useState(false)
+  const [editRecord, setEditRecord] = useState(null)
+  const [defaultPid, setDefaultPid] = useState('')
+  const now = toDay()
+
+  // Filter en sorteer beschikbaarheidsrecords
+  const records = availability
+    .filter(r => {
+      if (tab === 'toekomend') return r.date >= now
+      if (tab === 'verleden')  return r.date <  now
+      return true
+    })
+    .filter(r => {
+      if (filterType === 'alle') return true
+      const p = personnel.find(x => x.id === r.personnelId)
+      return p?.type === filterType
+    })
+    .filter(r => {
+      if (!query) return true
+      const p = personnel.find(x => x.id === r.personnelId)
+      return (
+        p?.name.toLowerCase().includes(query.toLowerCase()) ||
+        (r.notes||'').toLowerCase().includes(query.toLowerCase())
+      )
+    })
+    .sort((a,b) => {
+      const d = a.date.localeCompare(b.date)
+      if (d !== 0) return tab === 'verleden' ? -d : d  // verleden: nieuwste eerst
+      const pa = personnel.find(x=>x.id===a.personnelId)
+      const pb = personnel.find(x=>x.id===b.personnelId)
+      return (pa?.name||'').localeCompare(pb?.name||'','nl')
+    })
+
+  // Evenementdatums voor markering
+  const eventDates = new Set(events.map(e=>e.date))
+
+  const openNew = (pid='') => { setEditRecord(null); setDefaultPid(pid); setShowModal(true) }
+  const openEdit = r => { setEditRecord(r); setDefaultPid(r.personnelId); setShowModal(true) }
+
+  const del = async r => {
+    const p = personnel.find(x=>x.id===r.personnelId)
+    if (!confirm(`Beschikbaarheid van ${p?.name||'?'} op ${fmtDate(r.date)} verwijderen?`)) return
+    await removeDoc(tid, 'availability', r.id)
+    toast('Verwijderd')
+  }
+
+  // Vandaag beschikbaar overzicht voor de pageheader
+  const vandaag = availability.filter(r => r.date === now)
+  const vandaagBeschikbaar = vandaag.filter(r => r.status === 'beschikbaar').length
+
+  return (
+    <>
+      <div className="ph" style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between'}}>
+        <div>
+          <div className="ph-t">Beschikbaarheid</div>
+          <div className="ph-s">
+            {vandaagBeschikbaar > 0
+              ? `${vandaagBeschikbaar} persoon${vandaagBeschikbaar!==1?'en':''} beschikbaar vandaag`
+              : 'Beschikbaarheid van personeel per datum'
+            }
+          </div>
+        </div>
+        <button className="btn btn-primary" style={{marginTop:4}} onClick={()=>openNew()}>
+          <IcPlus size={16}/>Toevoegen
+        </button>
       </div>
+
+      <div className="page-body">
+
+        {/* Tabs: toekomend / verleden / alle */}
+        <div style={{display:'flex',gap:0,marginBottom:16,borderBottom:'2px solid var(--border)'}}>
+          {[
+            {key:'toekomend', label:`Toekomend (${availability.filter(r=>r.date>=now).length})`},
+            {key:'verleden',  label:`Verleden (${availability.filter(r=>r.date<now).length})`},
+            {key:'alle',      label:`Alle (${availability.length})`},
+          ].map(t=>(
+            <button key={t.key} onClick={()=>setTab(t.key)} style={{
+              padding:'8px 18px', fontWeight:600, fontSize:13, border:'none', background:'none',
+              cursor:'pointer', color: tab===t.key ? 'var(--accent)' : 'var(--ink3)',
+              borderBottom: tab===t.key ? '2px solid var(--accent)' : '2px solid transparent',
+              marginBottom:'-2px',
+            }}>{t.label}</button>
+          ))}
+        </div>
+
+        {/* Filterbar */}
+        <div style={{display:'flex',gap:10,marginBottom:16,flexWrap:'wrap',alignItems:'center'}}>
+          <input className="form-input" value={query} onChange={e=>setQuery(e.target.value)}
+            placeholder="Zoeken op naam of notitie…" style={{width:220}}/>
+          <div className="filter-bar" style={{marginBottom:0}}>
+            {['alle',...Object.keys(PERS_TYPES)].map(t=>(
+              <button key={t} className={`filter-btn${filterType===t?' active':''}`} onClick={()=>setFilterType(t)}>
+                {t==='alle' ? 'Alle typen' : PERS_TYPES[t]}
+              </button>
+            ))}
+          </div>
+          {/* Legenda */}
+          <div style={{fontSize:12,color:'var(--ink3)',display:'flex',gap:12,marginLeft:'auto'}}>
+            {Object.entries(AV_STATUS).map(([k,v])=>(
+              <span key={k} style={{color:AV_COLOR[k]}}>■ {v}</span>
+            ))}
+          </div>
+        </div>
+
+        {records.length === 0
+          ? (
+            <div className="empty">
+              <div className="empty-icon">📋</div>
+              <div className="empty-text">
+                {availability.length === 0
+                  ? 'Nog geen beschikbaarheid ingevoerd'
+                  : 'Geen resultaten voor deze filters'
+                }
+              </div>
+              {availability.length === 0 && (
+                <button className="btn btn-primary" style={{marginTop:16}} onClick={()=>openNew()}>
+                  <IcPlus size={16}/>Eerste invoer toevoegen
+                </button>
+              )}
+            </div>
+          )
+          : (
+            <div className="tbl-wrap">
+              {records.map(r => {
+                const person   = personnel.find(x=>x.id===r.personnelId)
+                const dt       = new Date(r.date+'T12:00')
+                const day      = dt.toLocaleDateString('nl-NL',{day:'numeric'})
+                const mon      = dt.toLocaleDateString('nl-NL',{month:'short'})
+                const dow      = dt.toLocaleDateString('nl-NL',{weekday:'short'})
+                const isEvent  = eventDates.has(r.date)
+                const barColor = AV_COLOR[r.status] || 'var(--ink3)'
+
+                return (
+                  <div key={r.id} className="av-row" onClick={()=>openEdit(r)}>
+                    {/* Gekleurde statusbalk links */}
+                    <div className="av-row-bar" style={{background:barColor}}/>
+                    <div className="av-row-content">
+                      {/* Datumblok */}
+                      <div className="av-date-block">
+                        <div className="day">{day}</div>
+                        <div className="mon">{mon}</div>
+                        <div className="dow">{dow}</div>
+                      </div>
+
+                      {/* Persoon + type */}
+                      <div style={{flex:'0 0 200px',minWidth:0}}>
+                        <div style={{fontWeight:600,fontSize:14}}>{person?.name||'Onbekend'}</div>
+                        <div style={{fontSize:12,color:'var(--ink3)'}}>{PERS_TYPES[person?.type]||person?.type||''}</div>
+                        {person?.function && <div style={{fontSize:11.5,color:'var(--ink3)'}}>{person.function}</div>}
+                      </div>
+
+                      {/* Status badge */}
+                      <div style={{flex:'0 0 140px'}}>
+                        <span className="badge" style={{background:AV_BG[r.status],color:AV_COLOR[r.status],fontSize:13}}>
+                          {AV_STATUS[r.status]||r.status}
+                        </span>
+                        {isEvent && (
+                          <div style={{fontSize:11,color:'var(--accent)',marginTop:4}}>📅 event gepland</div>
+                        )}
+                      </div>
+
+                      {/* Tijden */}
+                      <div style={{flex:'0 0 120px',fontSize:13,color:'var(--ink2)'}}>
+                        {r.timeFrom || r.timeTo
+                          ? <>{r.timeFrom||'?'} – {r.timeTo||'?'}</>
+                          : <span style={{color:'var(--ink3)'}}>Hele dag</span>
+                        }
+                      </div>
+
+                      {/* Notities */}
+                      <div style={{flex:1,minWidth:0}}>
+                        {r.notes
+                          ? <span style={{fontSize:13,color:'var(--ink2)',fontStyle:'italic',
+                              overflow:'hidden',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical'}}>
+                              {r.notes}
+                            </span>
+                          : null
+                        }
+                      </div>
+
+                      {/* Acties */}
+                      <div style={{display:'flex',gap:6,flexShrink:0}} onClick={e=>e.stopPropagation()}>
+                        <button className="btn btn-ghost btn-sm" onClick={()=>openEdit(r)}>
+                          <IcEdit size={13}/>
+                        </button>
+                        <button className="btn btn-ghost btn-sm" onClick={()=>del(r)}>
+                          <IcTrash size={13}/>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )
+        }
+
+        {/* Per-persoon snelkoppelingen als er personeel is maar geen records */}
+        {records.length === 0 && availability.length === 0 && personnel.length > 0 && (
+          <div style={{marginTop:20}}>
+            <div style={{fontSize:13,color:'var(--ink3)',marginBottom:10}}>Snel toevoegen per persoon:</div>
+            <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+              {[...personnel].sort((a,b)=>a.name.localeCompare(b.name,'nl')).map(p=>(
+                <button key={p.id} className="btn btn-ghost btn-sm" onClick={()=>openNew(p.id)}>
+                  {p.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {showModal && (
+        <AvailabilityModal
+          tid={tid}
+          record={editRecord}
+          personnel={personnel}
+          defaultPersonnelId={defaultPid}
+          onClose={()=>setShowModal(false)}
+          onSave={()=>{ setShowModal(false); toast('Beschikbaarheid opgeslagen') }}
+        />
+      )}
     </>
   )
 }
@@ -1263,7 +1474,7 @@ function BeheerView({ onImpersonate }) {
 export default function App() {
   const [authUser,    setAuthUser]    = useState(undefined)   // undefined=loading
   const [tenantId,    setTenantId]    = useState(null)
-  const [data, setData] = useState({ events:[], personnel:[], assignments:[], availability:{} })
+  const [data, setData] = useState({ events:[], personnel:[], assignments:[], availability:[] })
   const [view,        setView]        = useState('dashboard')
   const [loading,     setLoading]     = useState(true)
   const [toastMsg,    setToastMsg]    = useState(null)
@@ -1281,7 +1492,7 @@ export default function App() {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, user => {
       setAuthUser(user ?? null)
-      if (!user) { setTenantId(null); setData({events:[],personnel:[],assignments:[],availability:{}}); setLoading(false) }
+      if (!user) { setTenantId(null); setData({events:[],personnel:[],assignments:[],availability:[]}); setLoading(false) }
     })
     return unsub
   }, [])
@@ -1309,8 +1520,7 @@ export default function App() {
       setData(p=>({...p,[key]:docs}))
     })
     const subAv = onSnapshot(tCol(tenantId,'availability'), snap => {
-      const av = {}
-      snap.docs.forEach(d=>{ av[d.id]=d.data() })
+      const av = snap.docs.map(d=>({id:d.id,...d.data()}))
       setData(p=>({...p,availability:av}))
     })
 
