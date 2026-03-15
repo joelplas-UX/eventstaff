@@ -1,0 +1,30 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Users kunnen eigen doc lezen/schrijven (tenantId koppeling)
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // Tenant root + subcollecties
+    match /tenants/{tenantId} {
+      // Tenant doc: lezen als je lid bent, aanmaken als je ingelogd bent (onboarding)
+      allow read:   if isMember(tenantId);
+      allow create: if request.auth != null;
+      allow update: if isMember(tenantId);
+      allow delete: if false; // Alleen superadmin via console
+
+      // Alle subcollecties: toegankelijk voor tenantleden
+      match /{collection}/{docId} {
+        allow read, write: if isMember(tenantId);
+      }
+    }
+
+    function isMember(tenantId) {
+      return request.auth != null &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.tenantId == tenantId;
+    }
+  }
+}
