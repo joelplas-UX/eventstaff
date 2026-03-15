@@ -1,6 +1,5 @@
 // ─── EventStaff — Multi-tenant SaaS voor eventplanners ──────────────────────
 import { useState, useEffect, useRef } from 'react'
-import emailjs from '@emailjs/browser'
 import { initializeApp } from 'firebase/app'
 import {
   getAuth, onAuthStateChanged,
@@ -48,40 +47,31 @@ async function linkUser(uid,tenantId,role='admin') {
   await setDoc(doc(db,'users',uid),{tenantId,role},{merge:true})
 }
 
-// ─── Email helpers (EmailJS) ─────────────────────────────────────────────────
-const EJS_SVC  = import.meta.env.VITE_EMAILJS_SERVICE_ID    || ''
-const EJS_PUB  = import.meta.env.VITE_EMAILJS_PUBLIC_KEY    || ''
-const EJS_INV  = import.meta.env.VITE_EMAILJS_INVITE_TEMPLATE     || ''
-const EJS_ASS  = import.meta.env.VITE_EMAILJS_ASSIGNMENT_TEMPLATE || ''
-const APP_URL  = import.meta.env.VITE_APP_URL || window.location.origin
+// ─── Email helpers (Resend via Netlify Function) ──────────────────────────────
+const APP_URL = import.meta.env.VITE_APP_URL || window.location.origin
 
-async function sendEmail(templateId, params) {
-  if (!EJS_SVC || !EJS_PUB || !templateId) return   // niet geconfigureerd
+async function callEmailFn(payload) {
   try {
-    await emailjs.send(EJS_SVC, templateId, params, { publicKey: EJS_PUB })
+    const res = await fetch('/.netlify/functions/send-email', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(payload),
+    })
+    if (!res.ok) console.warn('Email mislukt:', await res.text())
   } catch(e) { console.warn('Email mislukt:', e) }
 }
 
 function sendInviteEmail({ name, email, inviteToken, tenantId, bureauName }) {
-  const url = `${APP_URL}/?invite=${inviteToken}&tid=${tenantId}`
-  return sendEmail(EJS_INV, {
-    to_name:    name,
-    to_email:   email,
-    invite_url: url,
-    bureau_name:bureauName,
-  })
+  const inviteUrl = `${APP_URL}/?invite=${inviteToken}&tid=${tenantId}`
+  return callEmailFn({ type:'invite', name, email, bureauName, inviteUrl })
 }
 
 function sendAssignmentEmail({ name, email, eventTitle, eventDate, location, role, callTime }) {
-  return sendEmail(EJS_ASS, {
-    to_name:        name,
-    to_email:       email,
-    event_title:    eventTitle,
-    event_date:     fmtDateLong(eventDate),
-    event_location: location || '—',
-    assignment_role:role || '—',
-    call_time:      callTime || '—',
-    app_url:        APP_URL,
+  return callEmailFn({
+    type:'assignment', name, email,
+    eventTitle, eventDate: fmtDateLong(eventDate),
+    eventLocation: location || '', role: role || '', callTime: callTime || '',
+    appUrl: APP_URL,
   })
 }
 
