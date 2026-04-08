@@ -4,6 +4,7 @@ import { initializeApp } from 'firebase/app'
 import {
   getAuth, onAuthStateChanged,
   signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut,
+  signInWithCustomToken,
 } from 'firebase/auth'
 import {
   getFirestore, doc, collection, getDoc, getDocs,
@@ -66,12 +67,12 @@ function sendInviteEmail({ name, email, inviteToken, tenantId, bureauName }) {
   return callEmailFn({ type:'invite', name, email, bureauName, inviteUrl })
 }
 
-function sendAssignmentEmail({ name, email, eventTitle, eventDate, location, role, callTime }) {
+function sendAssignmentEmail({ name, email, eventTitle, eventDate, location, role, callTime, assignmentToken }) {
   return callEmailFn({
     type:'assignment', name, email,
     eventTitle, eventDate: fmtDateLong(eventDate),
     eventLocation: location || '', role: role || '', callTime: callTime || '',
-    appUrl: APP_URL,
+    appUrl: APP_URL, assignmentToken: assignmentToken || null,
   })
 }
 
@@ -340,25 +341,71 @@ function Sidebar({ view, setView, onLogout, isSuperadmin, collapsed, setCollapse
 
 // ─── LoginScreen ─────────────────────────────────────────────────────────────
 function LoginScreen({ onRegister }) {
-  const [email, setEmail] = useState('')
-  const [pass,  setPass]  = useState('')
-  const [err,   setErr]   = useState('')
-  const [busy,  setBusy]  = useState(false)
+  const [email,      setEmail]      = useState('')
+  const [pass,       setPass]       = useState('')
+  const [err,        setErr]        = useState('')
+  const [busy,       setBusy]       = useState(false)
+  const [mode,       setMode]       = useState('password')  // 'password' | 'magic'
+  const [magicSent,  setMagicSent]  = useState(false)
 
-  const handle = async e => {
+  // Controleer bij laden of er een ?magic=TOKEN in de URL staat
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const token  = params.get('magic')
+    if (!token) return
+    setBusy(true); setErr('')
+    fetch(`/.netlify/functions/magic-link?token=${token}`)
+      .then(res => res.json())
+      .then(async data => {
+        if (data.customToken) {
+          await signInWithCustomToken(auth, data.customToken)
+          window.history.replaceState({}, '', '/')
+        } else {
+          setErr(data.error === 'expired' ? 'De inloglink is verlopen. Vraag een nieuwe aan.' : 'Ongeldige inloglink.')
+        }
+      })
+      .catch(() => setErr('Inloggen via link mislukt. Probeer het opnieuw.'))
+      .finally(() => setBusy(false))
+  }, [])
+
+  const handlePassword = async e => {
     e.preventDefault()
     setErr(''); setBusy(true)
     try {
       await signInWithEmailAndPassword(auth, email.trim(), pass)
     } catch(ex) {
       const msgs = {
-        'auth/user-not-found':  'Geen account met dit e-mailadres.',
-        'auth/wrong-password':  'Onjuist wachtwoord.',
-        'auth/invalid-email':   'Ongeldig e-mailadres.',
+        'auth/user-not-found':     'Geen account met dit e-mailadres.',
+        'auth/wrong-password':     'Onjuist wachtwoord.',
+        'auth/invalid-email':      'Ongeldig e-mailadres.',
         'auth/invalid-credential': 'E-mailadres of wachtwoord onjuist.',
       }
       setErr(msgs[ex.code] || 'Inloggen mislukt. Probeer het opnieuw.')
     } finally { setBusy(false) }
+  }
+
+  const handleMagic = async e => {
+    e.preventDefault()
+    setErr(''); setBusy(true)
+    try {
+      const res = await fetch('/.netlify/functions/magic-link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email.trim() }),
+      })
+      if (!res.ok) throw new Error()
+      setMagicSent(true)
+    } catch {
+      setErr('Kon geen link versturen. Controleer het e-mailadres.')
+    } finally { setBusy(false) }
+  }
+
+  if (busy && new URLSearchParams(window.location.search).get('magic')) {
+    return (
+      <div className="login-wrap">
+        <div style={{color:'var(--ink3)'}}>Inloggen via link…</div>
+      </div>
+    )
   }
 
   return (
@@ -367,23 +414,69 @@ function LoginScreen({ onRegister }) {
         <div className="login-logo">EventStaff</div>
         <div className="login-sub">Personeelsplanning voor eventprofessionals</div>
         {err && <div className="login-err">{err}</div>}
-        <form onSubmit={handle}>
-          <div className="form-row">
-            <div>
-              <label className="form-label">E-mailadres</label>
-              <input className="form-input" type="email" value={email} onChange={e=>setEmail(e.target.value)} required autoFocus/>
-            </div>
-          </div>
-          <div className="form-row" style={{marginBottom:20}}>
-            <div>
-              <label className="form-label">Wachtwoord</label>
-              <input className="form-input" type="password" value={pass} onChange={e=>setPass(e.target.value)} required/>
-            </div>
-          </div>
-          <button className="btn btn-primary" style={{width:'100%',justifyContent:'center'}} disabled={busy}>
-            {busy ? 'Bezig…' : 'Inloggen'}
+
+        {/* Mode toggle */}
+        <div style={{display:'flex',gap:0,marginBottom:20,border:'1px solid var(--border)',borderRadius:8,overflow:'hidden'}}>
+          <button type="button" onClick={()=>{setMode('password');setMagicSent(false);setErr('')}}
+            style={{flex:1,padding:'8px 0',fontSize:13,fontWeight:mode==='password'?700:400,
+              background:mode==='password'?'var(--accent)':'transparent',
+              color:mode==='password'?'#fff':'var(--ink2)',border:'none',cursor:'pointer'}}>
+            Wachtwoord
           </button>
-        </form>
+          <button type="button" onClick={()=>{setMode('magic');setErr('')}}
+            style={{flex:1,padding:'8px 0',fontSize:13,fontWeight:mode==='magic'?700:400,
+              background:mode==='magic'?'var(--accent)':'transparent',
+              color:mode==='magic'?'#fff':'var(--ink2)',border:'none',cursor:'pointer'}}>
+            Inloglink per mail
+          </button>
+        </div>
+
+        {mode === 'password' ? (
+          <form onSubmit={handlePassword}>
+            <div className="form-row">
+              <div>
+                <label className="form-label">E-mailadres</label>
+                <input className="form-input" type="email" value={email} onChange={e=>setEmail(e.target.value)} required autoFocus/>
+              </div>
+            </div>
+            <div className="form-row" style={{marginBottom:20}}>
+              <div>
+                <label className="form-label">Wachtwoord</label>
+                <input className="form-input" type="password" value={pass} onChange={e=>setPass(e.target.value)} required/>
+              </div>
+            </div>
+            <button className="btn btn-primary" style={{width:'100%',justifyContent:'center'}} disabled={busy}>
+              {busy ? 'Bezig…' : 'Inloggen'}
+            </button>
+          </form>
+        ) : magicSent ? (
+          <div style={{textAlign:'center',padding:'8px 0'}}>
+            <div style={{fontSize:40,marginBottom:12}}>📧</div>
+            <div style={{fontWeight:700,marginBottom:8}}>Controleer je inbox</div>
+            <div style={{fontSize:13,color:'var(--ink2)',lineHeight:1.6}}>
+              We hebben een inloglink gestuurd naar <strong>{email}</strong>.<br/>
+              De link is 15 minuten geldig.
+            </div>
+            <button className="btn btn-ghost" style={{marginTop:16,width:'100%',justifyContent:'center'}}
+              onClick={()=>setMagicSent(false)}>
+              Opnieuw versturen
+            </button>
+          </div>
+        ) : (
+          <form onSubmit={handleMagic}>
+            <div className="form-row" style={{marginBottom:20}}>
+              <div>
+                <label className="form-label">E-mailadres</label>
+                <input className="form-input" type="email" value={email} onChange={e=>setEmail(e.target.value)} required autoFocus
+                  placeholder="Vul je e-mailadres in"/>
+              </div>
+            </div>
+            <button className="btn btn-primary" style={{width:'100%',justifyContent:'center'}} disabled={busy||!email.trim()}>
+              {busy ? 'Versturen…' : 'Inloglink versturen'}
+            </button>
+          </form>
+        )}
+
         <div style={{marginTop:20,textAlign:'center',fontSize:13,color:'var(--ink3)'}}>
           Nog geen account?{' '}
           <button style={{color:'var(--accent)',fontWeight:600,fontSize:13}} onClick={onRegister}>
@@ -699,19 +792,27 @@ function AssignmentModal({ tid, eventId, eventDate, eventTitle, eventLocation, p
     e.preventDefault()
     if (!pid) return
     setBusy(true)
-    const isNew = !existing?.id
+    const isNew  = !existing?.id
+    const assId  = existing?.id || uid()
     try {
       await saveDoc(tid,'assignments',{
-        id: existing?.id||uid(), eventId, personnelId:pid,
+        id: assId, eventId, personnelId:pid,
         role, callTime:call, endTime:end, fee, status, createdAt:Date.now(),
       })
       // Stuur notificatiemail bij nieuw assignment of statuswijziging naar 'uitgenodigd'
       const person = personnel.find(p=>p.id===pid)
       if (person?.email && (isNew || (existing?.status !== status && status === 'uitgenodigd'))) {
+        // Sla een bevestigingstoken op (7 dagen geldig) voor één-klik reactie via e-mail
+        const assignmentToken = uid()
+        await setDoc(doc(db,'assignmentTokens',assignmentToken), {
+          tenantId: tid, assignmentId: assId, personnelId: pid,
+          expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
+        })
         sendAssignmentEmail({
           name: person.name, email: person.email,
           eventTitle: eventTitle||'', eventDate: eventDate||'',
           location: eventLocation||'', role, callTime: call,
+          assignmentToken,
         })
       }
       onSave()
@@ -756,9 +857,11 @@ function AssignmentModal({ tid, eventId, eventDate, eventTitle, eventLocation, p
 }
 
 // ─── EventDetailPanel ─────────────────────────────────────────────────────────
-function EventDetailPanel({ tid, event, assignments, personnel, onEdit, onDelete, onClose, toast }) {
+function EventDetailPanel({ tid, event, assignments, personnel, eventTasks, onEdit, onDelete, onClose, toast }) {
   const [showAssModal, setShowAssModal] = useState(false)
-  const [editAss, setEditAss] = useState(null)
+  const [editAss,      setEditAss]      = useState(null)
+  const [newTask,      setNewTask]      = useState('')
+  const [addingTask,   setAddingTask]   = useState(false)
 
   const myAss = assignments.filter(a => a.eventId === event.id)
   const assStatusColor = { uitgenodigd:'var(--orange)', bevestigd:'var(--green)', afgewezen:'var(--red)' }
@@ -769,6 +872,18 @@ function EventDetailPanel({ tid, event, assignments, personnel, onEdit, onDelete
     await removeDoc(tid,'assignments',id)
     toast('Toewijzing verwijderd')
   }
+
+  // ── Taken helpers ────────────────────────────────────────────────────────
+  const addTask = async () => {
+    if (!newTask.trim()) return
+    setAddingTask(true)
+    try {
+      await saveDoc(tid,'eventTasks',{ id:uid(), eventId:event.id, title:newTask.trim(), done:false, createdAt:Date.now() })
+      setNewTask('')
+    } finally { setAddingTask(false) }
+  }
+  const toggleTask = (task) => saveDoc(tid,'eventTasks',{...task, done:!task.done})
+  const delTask    = async (id) => { if (!confirm('Taak verwijderen?')) return; await removeDoc(tid,'eventTasks',id) }
 
   const df = (v,fallback='—') => v || fallback
 
@@ -882,6 +997,37 @@ function EventDetailPanel({ tid, event, assignments, personnel, onEdit, onDelete
                 </tbody>
               </table>
           }
+        </div>
+
+        {/* ── Taken ───────────────────────────────────────────────────── */}
+        <div style={{padding:'0 24px 8px'}}>
+          <div style={{fontSize:12,fontWeight:700,color:'var(--ink3)',textTransform:'uppercase',letterSpacing:1,marginBottom:12,marginTop:4}}>
+            Taken checklist
+          </div>
+          {(eventTasks||[]).length === 0 && (
+            <div style={{fontSize:13,color:'var(--ink3)',marginBottom:10}}>Nog geen taken voor dit evenement.</div>
+          )}
+          {(eventTasks||[]).sort((a,b)=>a.createdAt-b.createdAt).map(t => (
+            <div key={t.id} style={{display:'flex',alignItems:'center',gap:10,padding:'6px 0',borderBottom:'1px solid var(--border)'}}>
+              <input type="checkbox" checked={t.done} onChange={()=>toggleTask(t)}
+                style={{width:16,height:16,accentColor:'var(--accent)',cursor:'pointer',flexShrink:0}}/>
+              <span style={{flex:1,fontSize:14,color:t.done?'var(--ink3)':'var(--ink)',
+                textDecoration:t.done?'line-through':'none',lineHeight:1.4}}>
+                {t.title}
+              </span>
+              <button className="btn btn-ghost btn-sm" onClick={()=>delTask(t.id)} style={{padding:'2px 6px',opacity:.5}}>
+                <IcTrash size={12}/>
+              </button>
+            </div>
+          ))}
+          <div style={{display:'flex',gap:8,marginTop:10}}>
+            <input className="form-input" style={{flex:1,fontSize:13}} placeholder="Nieuwe taak toevoegen…"
+              value={newTask} onChange={e=>setNewTask(e.target.value)}
+              onKeyDown={e=>e.key==='Enter'&&(e.preventDefault(),addTask())}/>
+            <button className="btn btn-ghost btn-sm" onClick={addTask} disabled={addingTask||!newTask.trim()}>
+              <IcPlus size={14}/>
+            </button>
+          </div>
         </div>
       </Modal>
 
@@ -1021,8 +1167,19 @@ function PersoneelModal({ tid, person, tenantName, onSave, onClose }) {
     if (!f.name.trim()) return
     setBusy(true)
     try {
-      await saveDoc(tid,'personnel',{...f, updatedAt:Date.now()})
-      onSave()
+      const isNew = !f.id
+      const newId = isNew ? uid() : f.id
+      await saveDoc(tid,'personnel',{...f, id:newId, updatedAt:Date.now()})
+
+      // Feature: auto-invite bij aanmaken nieuw personeelslid met e-mailadres
+      if (isNew && f.email) {
+        const token = uid()
+        await saveDoc(tid,'personnel',{ id:newId, inviteToken:token, invitedAt:Date.now(), portalEnabled:true })
+        sendInviteEmail({ name:f.name, email:f.email, inviteToken:token, tenantId:tid, bureauName:tenantName||'EventStaff' })
+        onSave('Personeelslid aangemaakt + uitnodiging verstuurd!')
+      } else {
+        onSave()
+      }
     } finally { setBusy(false) }
   }
 
@@ -1052,7 +1209,9 @@ function PersoneelModal({ tid, person, tenantName, onSave, onClose }) {
     <Modal title={f.id ? 'Personeelslid bewerken' : 'Nieuw personeelslid'} onClose={onClose} size="modal-md"
       footer={<>
         <button className="btn btn-ghost" onClick={onClose}>Annuleren</button>
-        <button className="btn btn-primary" onClick={submit} disabled={busy}>{busy?'Opslaan…':'Opslaan'}</button>
+        <button className="btn btn-primary" onClick={submit} disabled={busy}>
+          {busy ? 'Opslaan…' : (!f.id && f.email) ? '📧 Toevoegen & uitnodigen' : 'Opslaan'}
+        </button>
       </>}>
       <form onSubmit={submit}>
         <div className="form-row">
@@ -1102,9 +1261,9 @@ function PersoneelModal({ tid, person, tenantName, onSave, onClose }) {
             </div>
           </>
         )}
-        {!f.id && (
-          <div style={{fontSize:12,color:'var(--ink3)',marginTop:12,padding:'10px 14px',background:'var(--bg)',borderRadius:8}}>
-            💡 Sla het personeelslid eerst op — daarna kun je een portaaluitnodiging sturen.
+        {!f.id && f.email && (
+          <div style={{fontSize:12,color:'var(--ink2)',marginTop:12,padding:'10px 14px',background:'var(--bg)',borderRadius:8}}>
+            📧 Er wordt automatisch een uitnodigingsmail verstuurd na het aanmaken.
           </div>
         )}
       </form>
@@ -1113,7 +1272,7 @@ function PersoneelModal({ tid, person, tenantName, onSave, onClose }) {
 }
 
 // ─── PersoneelView ────────────────────────────────────────────────────────────
-function PersoneelView({ tid, personnel, assignments, events, tenantName, toast }) {
+function PersoneelView({ tid, personnel, assignments, events, tenantName, toast, currentUserUid }) {
   const [showModal,   setShowModal]   = useState(false)
   const [editPerson,  setEditPerson]  = useState(null)
   const [filterType,  setFilterType]  = useState('alle')
@@ -1125,6 +1284,10 @@ function PersoneelView({ tid, personnel, assignments, events, tenantName, toast 
     .sort((a,b) => a.name.localeCompare(b.name,'nl'))
 
   const del = async p => {
+    if (p.uid && p.uid === currentUserUid) {
+      alert('Je kunt je eigen account niet verwijderen.')
+      return
+    }
     if (!confirm(`"${p.name}" verwijderen?`)) return
     await removeDoc(tid,'personnel',p.id)
     toast('Personeelslid verwijderd')
@@ -1190,7 +1353,11 @@ function PersoneelView({ tid, personnel, assignments, events, tenantName, toast 
                       <td>
                         <div style={{display:'flex',gap:6}}>
                           <button className="btn btn-ghost btn-sm" onClick={()=>{setEditPerson(p);setShowModal(true)}}><IcEdit size={13}/></button>
-                          <button className="btn btn-ghost btn-sm" onClick={()=>del(p)}><IcTrash size={13}/></button>
+                          <button className="btn btn-ghost btn-sm" onClick={()=>del(p)}
+                            disabled={!!(p.uid && p.uid===currentUserUid)}
+                            title={p.uid && p.uid===currentUserUid ? 'Je kunt jezelf niet verwijderen' : undefined}>
+                            <IcTrash size={13}/>
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -1204,7 +1371,7 @@ function PersoneelView({ tid, personnel, assignments, events, tenantName, toast 
       {showModal && (
         <PersoneelModal tid={tid} person={editPerson} tenantName={tenantName}
           onClose={()=>setShowModal(false)}
-          onSave={()=>{setShowModal(false); toast('Personeelslid opgeslagen')}}/>
+          onSave={msg=>{setShowModal(false); toast(msg||'Personeelslid opgeslagen')}}/>
       )}
     </>
   )
@@ -1924,7 +2091,7 @@ export default function App() {
   const [tenantName,  setTenantName]  = useState('')
   const [userRole,    setUserRole]    = useState(null)        // 'admin'|'planner'|'personnel'
   const [myPersonnel, setMyPersonnel] = useState(null)
-  const [data, setData] = useState({ events:[], personnel:[], assignments:[], availability:[] })
+  const [data, setData] = useState({ events:[], personnel:[], assignments:[], availability:[], eventTasks:[] })
   const [view,        setView]        = useState('dashboard')
   const [loading,     setLoading]     = useState(true)
   const [toastMsg,    setToastMsg]    = useState(null)
@@ -1976,16 +2143,13 @@ export default function App() {
       const docs = snap.docs.map(d=>({id:d.id,...d.data()}))
       setData(p=>({...p,[key]:docs}))
     })
-    const subAv = onSnapshot(tCol(tenantId,'availability'), snap => {
-      const av = snap.docs.map(d=>({id:d.id,...d.data()}))
-      setData(p=>({...p,availability:av}))
-    })
 
     unsubsRef.current = [
       sub('events','events'),
       sub('personnel','personnel'),
       sub('assignments','assignments'),
-      subAv,
+      sub('availability','availability'),
+      sub('eventTasks','eventTasks'),
     ]
     setLoading(false)
     return () => unsubsRef.current.forEach(u=>u())
@@ -2152,6 +2316,7 @@ export default function App() {
             <PersoneelView
               tid={tenantId} personnel={data.personnel} assignments={data.assignments}
               events={data.events} tenantName={tenantName} toast={toast}
+              currentUserUid={authUser?.uid}
             />
           )}
           {view==='beschikbaarheid' && (
@@ -2171,6 +2336,7 @@ export default function App() {
         <EventDetailPanel
           tid={tenantId} event={selectedEvent}
           assignments={data.assignments} personnel={data.personnel}
+          eventTasks={data.eventTasks.filter(t=>t.eventId===selectedEvent.id)}
           toast={toast}
           onClose={()=>setShowDetail(false)}
           onEdit={()=>{ setEditEvent(selectedEvent); setShowDetail(false); setShowEditEv(true) }}

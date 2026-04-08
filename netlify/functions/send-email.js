@@ -38,7 +38,29 @@ function inviteHtml({ name, bureauName, inviteUrl }) {
 </body></html>`
 }
 
-function assignmentHtml({ name, eventTitle, eventDate, eventLocation, role, callTime, appUrl }) {
+function assignmentHtml({ name, eventTitle, eventDate, eventLocation, role, callTime, appUrl, confirmUrl, rejectUrl }) {
+  const actieKnoppen = confirmUrl ? `
+  <div style="text-align:center;margin:24px 0;display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+    <a href="${confirmUrl}"
+       style="background:#22c55e;color:#fff;text-decoration:none;padding:12px 28px;border-radius:8px;font-weight:600;font-size:14px;display:inline-block">
+      ✓ Bevestigen
+    </a>
+    <a href="${rejectUrl}"
+       style="background:#f1f5f9;color:#ef4444;text-decoration:none;padding:12px 28px;border-radius:8px;font-weight:600;font-size:14px;display:inline-block;border:1px solid #fecaca">
+      ✗ Afwijzen
+    </a>
+  </div>
+  <p style="color:#9a9a9a;font-size:12px;text-align:center;margin:0 0 16px">
+    Of <a href="${appUrl}" style="color:#2563eb">bekijk de opdracht in je portaal</a>.
+  </p>` : `
+  <div style="text-align:center;margin:24px 0">
+    <a href="${appUrl}"
+       style="background:#2563eb;color:#fff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:600;font-size:15px;display:inline-block">
+      Opdracht bekijken
+    </a>
+  </div>
+  <p style="color:#9a9a9a;font-size:12px;margin:0">Bevestig of wijs af via je portaal.</p>`
+
   return `
 <!DOCTYPE html><html lang="nl"><body style="font-family:Inter,Arial,sans-serif;background:#f8f7f4;margin:0;padding:32px">
 <div style="max-width:520px;margin:0 auto;background:#fff;border-radius:12px;padding:40px;box-shadow:0 2px 12px rgba(0,0,0,.06)">
@@ -60,15 +82,7 @@ function assignmentHtml({ name, eventTitle, eventDate, eventLocation, role, call
           <td style="color:#1a1a1a">${callTime}</td></tr>` : ''}
     </table>
   </div>
-  <div style="text-align:center;margin:24px 0">
-    <a href="${appUrl}"
-       style="background:#2563eb;color:#fff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:600;font-size:15px;display:inline-block">
-      Opdracht bekijken
-    </a>
-  </div>
-  <p style="color:#9a9a9a;font-size:12px;margin:0">
-    Bevestig of wijs af via je portaal.
-  </p>
+  ${actieKnoppen}
 </div>
 </body></html>`
 }
@@ -100,14 +114,17 @@ exports.handler = async event => {
       html:    inviteHtml({ name: name || email, bureauName: bureauName || '', inviteUrl: inviteUrl || '' }),
     }
   } else if (type === 'assignment') {
-    const { name, email, eventTitle, eventDate, eventLocation, role, callTime, appUrl } = body
+    const { name, email, eventTitle, eventDate, eventLocation, role, callTime, appUrl, assignmentToken } = body
     if (!email) return { statusCode: 400, body: 'email verplicht' }
+    const fnBase   = (appUrl || APP_URL).replace(/\/$/, '')
+    const confirmUrl = assignmentToken ? `${fnBase}/.netlify/functions/confirm-assignment?token=${assignmentToken}&r=bevestigd` : null
+    const rejectUrl  = assignmentToken ? `${fnBase}/.netlify/functions/confirm-assignment?token=${assignmentToken}&r=afgewezen`  : null
     payload = {
       from:    FROM,
       to:      [email],
       subject: `Nieuwe opdracht: ${eventTitle || 'evenement'}`,
       html:    assignmentHtml({ name: name || email, eventTitle: eventTitle || '', eventDate: eventDate || '',
-                                eventLocation, role, callTime, appUrl: appUrl || '' }),
+                                eventLocation, role, callTime, appUrl: appUrl || '', confirmUrl, rejectUrl }),
     }
   } else {
     return { statusCode: 400, body: 'Onbekend type' }

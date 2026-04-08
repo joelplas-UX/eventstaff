@@ -2,9 +2,23 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Users kunnen eigen doc lezen/schrijven (tenantId koppeling)
+    // Users kunnen eigen doc lezen/schrijven (tenantId + role koppeling)
     match /users/{uid} {
       allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // Assignment-bevestigingstokens (één-klik bevestiging vanuit e-mail)
+    // Token zelf is het geheim; Admin SDK maakt en verwijdert ze server-side
+    match /assignmentTokens/{token} {
+      allow create: if request.auth != null;  // planner maakt token aan
+      allow read, delete: if true;             // function leest/verwijdert zonder auth
+    }
+
+    // Magic link tokens (wachtwoordloos inloggen)
+    // Admin SDK maakt en verwijdert ze server-side
+    match /magicTokens/{token} {
+      allow read, delete: if true;             // function leest/verwijdert zonder auth
+      allow create: if false;                  // alleen Admin SDK schrijft hier
     }
 
     // Tenant root + subcollecties
